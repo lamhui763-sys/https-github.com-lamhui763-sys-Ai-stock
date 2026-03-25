@@ -1,0 +1,7 @@
+{
+  "name": "AI Stock Analyst",
+  "description": "An AI-powered stock market dashboard that provides real-time data and analysis.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}

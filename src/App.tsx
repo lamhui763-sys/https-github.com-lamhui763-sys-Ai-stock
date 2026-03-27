@@ -6,6 +6,7 @@ import io from 'socket.io-client';
 import Portfolio from './components/Portfolio';
 import StockChart from './components/StockChart';
 import BacktestEngine from './components/BacktestEngine';
+import { retryWithBackoff } from './lib/retry';
 
 const FEATURES = [
   { id: 'stock', name: '股票分析', icon: TrendingUp },
@@ -80,13 +81,13 @@ export default function App() {
       
       let newsResponse;
       try {
-        newsResponse = await ai.models.generateContent({
+        newsResponse = await retryWithBackoff(() => ai.models.generateContent({
           model: "gemini-3-flash-preview",
           contents: newsQuery,
           config: {
             tools: [{ googleSearch: {} }],
           },
-        });
+        }));
       } catch (searchError) {
         console.error("News search failed:", searchError);
         newsResponse = { text: "新闻搜索服务暂时不可用，无法获取最新新闻。" };
@@ -123,13 +124,13 @@ export default function App() {
         }
       `;
 
-      const sentimentResponse = await ai.models.generateContent({
+      const sentimentResponse = await retryWithBackoff(() => ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: analysisPrompt,
         config: {
           responseMimeType: "application/json",
         },
-      });
+      }));
 
       const parsedResponse = JSON.parse(sentimentResponse.text || '{"sentimentAnalysis": [], "newsList": []}');
       setNewsWithSentiment(parsedResponse.sentimentAnalysis || []);
@@ -170,13 +171,13 @@ export default function App() {
       }
       `;
 
-      const reportResponse = await ai.models.generateContent({
+      const reportResponse = await retryWithBackoff(() => ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: reportPrompt,
         config: {
           responseMimeType: "application/json",
         },
-      });
+      }));
 
       setRetailReport(JSON.parse(reportResponse.text || '{}'));
       setAnalysis(''); // Clear old analysis as it's now merged
@@ -195,7 +196,7 @@ export default function App() {
     const input = chatInput;
     setChatInput('');
     try {
-      const response = await chatSession.sendMessage({ message: input });
+      const response = await retryWithBackoff(() => chatSession.sendMessage({ message: input }));
       setChatMessages(prev => [...prev, { role: 'model', text: response.text || '' }]);
     } catch (error) {
       console.error(error);
@@ -221,10 +222,10 @@ export default function App() {
         
         報告內容：${JSON.stringify(retailReport)}
       `;
-      const response = await ai.models.generateContent({
+      const response = await retryWithBackoff(() => ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: prompt,
-      });
+      }));
       setQaResponse(response.text || '無法獲取回答。');
     } catch (error) {
       console.error(error);

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Search, TrendingUp, BrainCircuit, BarChart3, History, Briefcase, Newspaper, Menu, X } from 'lucide-react';
 import { motion } from 'motion/react';
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
 import io from 'socket.io-client';
 import Portfolio from './components/Portfolio';
 import StockChart from './components/StockChart';
@@ -32,6 +32,10 @@ export default function App() {
   const [qaInput, setQaInput] = useState('');
   const [qaResponse, setQaResponse] = useState('');
   const [qaLoading, setQaLoading] = useState(false);
+  const [userPreferences, setUserPreferences] = useState({
+    riskTolerance: 'moderate',
+    investmentGoal: 'growth'
+  });
 
   // AI Chat states
   const [chatMessages, setChatMessages] = useState<{role: 'user' | 'model', text: string}[]>([]);
@@ -142,6 +146,7 @@ export default function App() {
       Fundamental Data: ${JSON.stringify(data.fundamental_data)}
       Technical Data: ${JSON.stringify(data.technical_data)}
       News: ${newsResponse.text}
+      User Preferences: Risk Tolerance: ${userPreferences.riskTolerance}, Investment Goal: ${userPreferences.investmentGoal}
 
       CRITICAL: You MUST identify the company name associated with the symbol ${symbol} from the provided data.
       If the data does not clearly identify the company, use the symbol ${symbol} as the company name.
@@ -196,7 +201,7 @@ export default function App() {
     const input = chatInput;
     setChatInput('');
     try {
-      const response = await retryWithBackoff(() => chatSession.sendMessage({ message: input }));
+      const response = await retryWithBackoff<GenerateContentResponse>(() => chatSession.sendMessage({ message: input }));
       setChatMessages(prev => [...prev, { role: 'model', text: response.text || '' }]);
     } catch (error) {
       console.error(error);
@@ -276,6 +281,22 @@ export default function App() {
         <h2 className="text-2xl font-bold text-zinc-900 mb-6">股票配置</h2>
         
         <div className="space-y-6 bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-zinc-200">
+          <div>
+            <label className="block text-sm font-medium text-zinc-700 mb-2">风险承受度</label>
+            <select value={userPreferences.riskTolerance} onChange={(e) => setUserPreferences({...userPreferences, riskTolerance: e.target.value})} className="w-full p-3 border border-zinc-300 rounded-xl bg-white">
+              <option value="low">低</option>
+              <option value="moderate">中</option>
+              <option value="high">高</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-zinc-700 mb-2">投资目标</label>
+            <select value={userPreferences.investmentGoal} onChange={(e) => setUserPreferences({...userPreferences, investmentGoal: e.target.value})} className="w-full p-3 border border-zinc-300 rounded-xl bg-white">
+              <option value="growth">增长</option>
+              <option value="income">收益</option>
+              <option value="preservation">保值</option>
+            </select>
+          </div>
           <div>
             <label className="block text-sm font-medium text-zinc-700 mb-2">股票代码</label>
             <input

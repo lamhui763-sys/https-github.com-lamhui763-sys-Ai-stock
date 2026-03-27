@@ -61,7 +61,7 @@ export default function BacktestEngine() {
 
           <div className="bg-white p-6 rounded-2xl shadow-sm border">
             <h3 className="font-semibold text-lg mb-4">资金曲线</h3>
-            <StockChart data={results.equityCurve} dataKey="value" dateKey="date" />
+            <StockChart data={results.equityCurve || []} dataKey="value" dateKey="date" />
           </div>
 
           <div className="bg-white p-6 rounded-2xl shadow-sm border">

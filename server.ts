@@ -11,8 +11,28 @@ dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 import yahooFinance from 'yahoo-finance2';
-const yahooFinanceInstance: any = new yahooFinance();
-// yahooFinance.setGlobalConfig({ validation: { skipValidation: true } });
+
+// Robust initialization of yahooFinance
+let yahoo: any;
+try {
+  // Try to see if it's a class that needs instantiation
+  if (typeof yahooFinance === 'function') {
+    yahoo = new (yahooFinance as any)();
+  } else if ((yahooFinance as any).YahooFinance) {
+    yahoo = new (yahooFinance as any).YahooFinance();
+  } else {
+    yahoo = yahooFinance;
+  }
+  console.log('Yahoo Finance initialized successfully');
+} catch (e) {
+  console.error('Failed to initialize Yahoo Finance:', e);
+  // Fallback to the default export if instantiation fails
+  yahoo = yahooFinance;
+}
+
+if (yahoo && typeof yahoo.setGlobalConfig === 'function') {
+  yahoo.setGlobalConfig({ validation: { skipValidation: true } });
+}
 
 function calculateSMA(data: any[], period: number) {
   const sma = [];
@@ -36,9 +56,11 @@ async function startServer() {
   const httpServer = http.createServer(app);
   const io = new Server(httpServer, {
     cors: {
-      origin: "*",
-      methods: ["GET", "POST"]
-    }
+      origin: true, // Allow all origins
+      methods: ["GET", "POST"],
+      credentials: true
+    },
+    allowEIO3: true // Support older clients if needed
   });
   const PORT = 3000;
 
@@ -47,12 +69,21 @@ async function startServer() {
     next();
   });
 
+  // Global error handler for the app
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error('Unhandled Error:', err);
+    res.status(500).json({ error: 'Internal Server Error', message: err.message });
+  });
+
   // Socket.io
   io.on("connection", (socket) => {
-    console.log("Client connected");
+    console.log("Client connected:", socket.id);
     socket.on("subscribe", (symbol) => {
       console.log(`Subscribing to ${symbol}`);
       socket.join(symbol);
+    });
+    socket.on("disconnect", (reason) => {
+      console.log("Client disconnected:", socket.id, "Reason:", reason);
     });
   });
 
@@ -61,7 +92,7 @@ async function startServer() {
     for (const room of io.sockets.adapter.rooms.keys()) {
       if (room.startsWith('^') || room.length < 10) { // Simple check to avoid internal rooms
         try {
-          const chartResult = await yahooFinanceInstance.chart(room, { period1: new Date(Date.now() - 86400000) });
+          const chartResult: any = await yahoo.chart(room, { period1: new Date(Date.now() - 86400000) });
           const lastPrice = chartResult.quotes[chartResult.quotes.length - 1].close;
           io.to(room).emit("priceUpdate", { symbol: room, price: lastPrice });
         } catch (e) {
@@ -80,7 +111,7 @@ async function startServer() {
     const symbol = req.params.symbol;
     try {
       // Fetch more news to give AI more context
-      const result = await yahooFinanceInstance.search(symbol);
+      const result: any = await yahoo.search(symbol);
       
       // Return a larger set of news, let the AI decide what is relevant
       const newsList = (result.news || []).slice(0, 10);
@@ -112,11 +143,20 @@ async function startServer() {
       else period1.setMonth(period1.getMonth() - 6); // default 6mo
 
       const queryOptions = { period1: period1.toISOString().split('T')[0] };
-      const chartResult = await yahooFinanceInstance.chart(symbol, queryOptions);
+      const chartResult: any = await yahoo.chart(symbol, queryOptions);
       
-      let quoteSummary = null;
+      let quoteSummary: any = null;
       try {
-        quoteSummary = await yahooFinanceInstance.quoteSummary(symbol, { modules: ['summaryDetail', 'defaultKeyStatistics', 'financialData'] });
+        quoteSummary = await yahoo.quoteSummary(symbol, { 
+          modules: [
+            'summaryDetail', 
+            'defaultKeyStatistics', 
+            'financialData', 
+            'incomeStatementHistory', 
+            'balanceSheetHistory', 
+            'cashflowStatementHistory'
+          ] 
+        });
       } catch (e) {
         console.warn(`Could not fetch fundamental data for ${symbol}:`, e);
       }
@@ -167,8 +207,8 @@ async function startServer() {
   app.post("/api/backtest", async (req, res) => {
     const { strategy, symbol, shortPeriod, longPeriod, initialCapital } = req.body;
     try {
-      const chartResult = await yahooFinanceInstance.chart(symbol, { period1: new Date(Date.now() - 31536000000) }); // 1 year
-      const quoteSummary = await yahooFinanceInstance.quoteSummary(symbol, { modules: ['summaryDetail', 'defaultKeyStatistics', 'financialData'] });
+      const chartResult: any = await yahoo.chart(symbol, { period1: new Date(Date.now() - 31536000000) }); // 1 year
+      const quoteSummary: any = await yahoo.quoteSummary(symbol, { modules: ['summaryDetail', 'defaultKeyStatistics', 'financialData'] });
       const quotes = chartResult.quotes;
       
       let capital = initialCapital;

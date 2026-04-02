@@ -1,12 +1,12 @@
 import { useState, useEffect } from 'react';
-import { Search, TrendingUp, BrainCircuit, BarChart3, History, Briefcase, Newspaper, Menu, X } from 'lucide-react';
+import { Search, TrendingUp, BrainCircuit, BarChart3, History, Briefcase, Newspaper, Menu, X, Info } from 'lucide-react';
 import { motion } from 'motion/react';
-import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import io from 'socket.io-client';
+import { Toaster, toast } from 'sonner';
 import Portfolio from './components/Portfolio';
 import StockChart from './components/StockChart';
 import BacktestEngine from './components/BacktestEngine';
-import { retryWithBackoff } from './lib/retry';
 
 const FEATURES = [
   { id: 'stock', name: '股票分析', icon: TrendingUp },
@@ -24,18 +24,127 @@ export default function App() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [socket, setSocket] = useState<any>(null);
   const [price, setPrice] = useState<number | null>(null);
+  const [alerts, setAlerts] = useState<{symbol: string, targetPrice: number, type: 'above' | 'below'}[]>([]);
   const [history, setHistory] = useState<any[]>([]);
   const [fundamentalData, setFundamentalData] = useState<any>(null);
   const [newsWithSentiment, setNewsWithSentiment] = useState<any[]>([]);
   const [rawNews, setRawNews] = useState<any[]>([]);
+
+  const getRedFlags = (data: any) => {
+    const flags = [];
+    const financialData = data.financialData;
+    const keyStats = data.defaultKeyStatistics;
+    const summary = data.summaryDetail;
+
+    if (financialData?.debtToEquity > 200) {
+      flags.push({ type: 'danger', message: '高槓桿風險：負債權益比 > 200%' });
+    }
+    if (financialData?.returnOnEquity < 0.10) {
+      flags.push({ type: 'warning', message: '獲利能力偏低：ROE < 10%' });
+    }
+    if (summary?.trailingPE > 50) {
+      flags.push({ type: 'warning', message: '估值過高：P/E > 50' });
+    }
+    if (financialData?.currentRatio < 1) {
+      flags.push({ type: 'danger', message: '流動性風險：流動比率 < 1' });
+    }
+    return flags;
+  };
+
+  const formatPercent = (val: any) => val ? (val * 100).toFixed(2) + '%' : 'N/A';
+  const formatNum = (val: any) => val ? val.toLocaleString() : 'N/A';
+  const formatCompact = (val: any) => val ? (val / 1e9).toFixed(2) + 'B' : 'N/A';
+
+  const safeJsonParse = (str: string, fallback: any = {}) => {
+    try {
+      // Clean up the string: remove markdown code blocks if present
+      let cleanStr = str.trim();
+      if (cleanStr.startsWith('```json')) {
+        cleanStr = cleanStr.replace(/^```json/, '').replace(/```$/, '').trim();
+      } else if (cleanStr.startsWith('```')) {
+        cleanStr = cleanStr.replace(/^```/, '').replace(/```$/, '').trim();
+      }
+      
+      // Try to find the first '{' and last '}' to extract just the JSON object
+      const firstBrace = cleanStr.indexOf('{');
+      const lastBrace = cleanStr.lastIndexOf('}');
+      const firstBracket = cleanStr.indexOf('[');
+      const lastBracket = cleanStr.lastIndexOf(']');
+      
+      let startIndex = -1;
+      let endIndex = -1;
+      
+      if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
+        startIndex = firstBrace;
+        endIndex = lastBrace;
+      } else if (firstBracket !== -1) {
+        startIndex = firstBracket;
+        endIndex = lastBracket;
+      }
+      
+      if (startIndex !== -1 && endIndex !== -1 && endIndex > startIndex) {
+        cleanStr = cleanStr.substring(startIndex, endIndex + 1);
+      }
+      
+      return JSON.parse(cleanStr);
+    } catch (e) {
+      console.error("Failed to parse JSON:", e, "Original string:", str);
+      return fallback;
+    }
+  };
+
+  const getPEInterpretation = (pe: number) => {
+    if (!pe) return null;
+    if (pe < 15) return { text: '估值較低 (便宜)', color: 'text-emerald-600' };
+    if (pe <= 30) return { text: '估值中等 (合理)', color: 'text-amber-600' };
+    return { text: '估值較高 (昂貴)', color: 'text-red-600' };
+  };
+
+  const getROEInterpretation = (roe: number) => {
+    if (!roe) return null;
+    if (roe >= 0.15) return { text: '獲利優秀', color: 'text-emerald-600' };
+    if (roe >= 0.10) return { text: '獲利尚可', color: 'text-amber-600' };
+    return { text: '獲利偏弱', color: 'text-red-600' };
+  };
+
+  const getRatingColor = (rating: string) => {
+    switch (rating) {
+      case '十分優秀': return 'text-emerald-600 bg-emerald-50 border-emerald-100';
+      case '優秀': return 'text-green-600 bg-green-50 border-green-100';
+      case '良好': return 'text-teal-600 bg-teal-50 border-teal-100';
+      case '合理': return 'text-blue-600 bg-blue-50 border-blue-100';
+      case '一般': return 'text-zinc-600 bg-zinc-50 border-zinc-100';
+      case '較差': return 'text-orange-600 bg-orange-50 border-orange-100';
+      case '十分差': return 'text-red-600 bg-red-50 border-red-100';
+      default: return 'text-zinc-500 bg-zinc-50 border-zinc-100';
+    }
+  };
+
+  const MetricCard = ({ title, value, interpretation, explanation }: { title: string, value: string | number, interpretation?: { text: string, color: string } | null, explanation: string }) => (
+    <div className="p-4 bg-zinc-50 rounded-2xl border border-zinc-100 group relative">
+      <div className="flex items-center justify-between mb-1">
+        <p className="text-xs text-zinc-500">{title}</p>
+        <div className="relative">
+          <Info className="w-3 h-3 text-zinc-300 cursor-help hover:text-zinc-500 transition-colors" />
+          <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-zinc-900 text-white text-[10px] rounded-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-20">
+            {explanation}
+            <div className="absolute top-full left-1/2 -translate-x-1/2 border-8 border-transparent border-t-zinc-900"></div>
+          </div>
+        </div>
+      </div>
+      <p className="text-lg font-bold text-zinc-900">{value}</p>
+      {interpretation && (
+        <p className={`text-[10px] font-bold mt-1 ${interpretation.color}`}>
+          {interpretation.text}
+        </p>
+      )}
+    </div>
+  );
+
   const [retailReport, setRetailReport] = useState<any>(null);
   const [qaInput, setQaInput] = useState('');
   const [qaResponse, setQaResponse] = useState('');
   const [qaLoading, setQaLoading] = useState(false);
-  const [userPreferences, setUserPreferences] = useState({
-    riskTolerance: 'moderate',
-    investmentGoal: 'growth'
-  });
 
   // AI Chat states
   const [chatMessages, setChatMessages] = useState<{role: 'user' | 'model', text: string}[]>([]);
@@ -43,35 +152,65 @@ export default function App() {
   const [chatSession, setChatSession] = useState<any>(null);
 
   useEffect(() => {
-    const newSocket = io();
+    const newSocket = io(window.location.origin, {
+      transports: ['polling', 'websocket'],
+      withCredentials: true,
+      reconnectionAttempts: 5,
+      timeout: 20000
+    });
     setSocket(newSocket);
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      console.error("GEMINI_API_KEY is missing!");
+      toast.error("GEMINI_API_KEY is missing! Please check your environment variables.");
+      return () => newSocket.close();
+    }
+    const ai = new GoogleGenAI({ apiKey });
     setChatSession(ai.chats.create({
       model: "gemini-3-flash-preview",
-      config: { systemInstruction: "You are a helpful stock analysis assistant." },
+      config: { systemInstruction: "你是一個專業的股票分析助手。當用戶詢問財務指標（如市盈率 P/E、ROE 等）時，請務必用淺顯易懂的語言解釋其含義，並說明該數字在當前行業背景下是否合理。對於小白用戶，請多用比喻（例如 P/E 是回本年期）。" },
     }));
     return () => newSocket.close();
   }, []);
 
   useEffect(() => {
     if (socket) {
+      socket.on('connect', () => console.log('Socket connected'));
+      socket.on('connect_error', (err: any) => console.error('Socket connection error:', err));
       socket.on('priceUpdate', (data: any) => {
         if (data.symbol === symbol) {
           setPrice(data.price);
         }
+        // Check alerts
+        alerts.forEach(alert => {
+          if (alert.symbol === data.symbol) {
+            if (alert.type === 'above' && data.price >= alert.targetPrice) {
+              toast.success(`Alert: ${data.symbol} reached ${data.price.toFixed(2)} (Target: ${alert.targetPrice})`);
+            } else if (alert.type === 'below' && data.price <= alert.targetPrice) {
+              toast.error(`Alert: ${data.symbol} dropped to ${data.price.toFixed(2)} (Target: ${alert.targetPrice})`);
+            }
+          }
+        });
       });
     }
-  }, [socket, symbol]);
+  }, [socket, symbol, alerts]);
 
   const handleSearch = async () => {
     setLoading(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) throw new Error('GEMINI_API_KEY is missing');
+      const ai = new GoogleGenAI({ apiKey });
 
       // 1. Fetch stock data
+      console.log(`Fetching stock data for ${symbol}...`);
       const analysisResponse = await fetch(`/api/analyze/${encodeURIComponent(symbol)}?period=${period}`);
-      if (!analysisResponse.ok) throw new Error('Failed to fetch stock data');
+      if (!analysisResponse.ok) {
+        const errorData = await analysisResponse.json().catch(() => ({}));
+        throw new Error(errorData.message || errorData.error || `Failed to fetch stock data: ${analysisResponse.status}`);
+      }
       const data = await analysisResponse.json();
+      console.log('Stock data received:', data);
 
       setPrice(data.last_price);
       setHistory(data.history || []);
@@ -85,13 +224,13 @@ export default function App() {
       
       let newsResponse;
       try {
-        newsResponse = await retryWithBackoff(() => ai.models.generateContent({
+        newsResponse = await ai.models.generateContent({
           model: "gemini-3-flash-preview",
           contents: newsQuery,
           config: {
             tools: [{ googleSearch: {} }],
           },
-        }));
+        });
       } catch (searchError) {
         console.error("News search failed:", searchError);
         newsResponse = { text: "新闻搜索服务暂时不可用，无法获取最新新闻。" };
@@ -115,7 +254,7 @@ export default function App() {
               "futureDirection": "公司未来的发展方向 (请根据腾讯业务背景合理推断)",
               "impactPros": "该方向带来的好处 (请根据腾讯业务背景合理推断)",
               "impactCons": "该方向带来的坏处 (请根据腾讯业务背景合理推断)",
-              "publicOpinion": "大众对该方向的看法 (请根据腾讯业务背景合理推断)"
+              "publicOpinion": "大众对该方向的看法 (请根據騰訊業務背景合理推斷)"
             }
           ],
           "newsList": [
@@ -128,15 +267,15 @@ export default function App() {
         }
       `;
 
-      const sentimentResponse = await retryWithBackoff(() => ai.models.generateContent({
+      const sentimentResponse = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: analysisPrompt,
         config: {
           responseMimeType: "application/json",
         },
-      }));
+      });
 
-      const parsedResponse = JSON.parse(sentimentResponse.text || '{"sentimentAnalysis": [], "newsList": []}');
+      const parsedResponse = safeJsonParse(sentimentResponse.text || '', {"sentimentAnalysis": [], "newsList": []});
       setNewsWithSentiment(parsedResponse.sentimentAnalysis || []);
       setRawNews(parsedResponse.newsList || []);
 
@@ -146,7 +285,6 @@ export default function App() {
       Fundamental Data: ${JSON.stringify(data.fundamental_data)}
       Technical Data: ${JSON.stringify(data.technical_data)}
       News: ${newsResponse.text}
-      User Preferences: Risk Tolerance: ${userPreferences.riskTolerance}, Investment Goal: ${userPreferences.investmentGoal}
 
       CRITICAL: You MUST identify the company name associated with the symbol ${symbol} from the provided data.
       If the data does not clearly identify the company, use the symbol ${symbol} as the company name.
@@ -158,6 +296,10 @@ export default function App() {
       2. Comprehensive Analysis (Technical & Fundamental) (綜合技術與基本面分析)
          - IMPORTANT: In this section, you MUST analyze and report any signals from RSI, MACD, Bollinger Bands, and Moving Averages (MA). If there are any buy/sell/trend signals, explicitly state them.
       3. Key Metrics Table (關鍵數據表現)
+         - IMPORTANT: For each metric in this table, the 'meaning' field MUST be a detailed, beginner-friendly explanation. 
+         - It should not just define the metric, but also provide a verdict on whether the current value is reasonable, healthy, cheap, or expensive based on the company's specific context (industry, historical average, growth).
+         - Example for P/E: "目前 17.81 倍代表回本期約 18 年，在科技行業中屬於合理偏低水平，顯示股價尚未過度泡沫。"
+         - NEW: For each metric, provide a 'rating' field. The value MUST be one of: "十分優秀", "優秀", "良好", "合理", "一般", "較差", "十分差".
       4. SWOT Analysis (好消息與風險提示)
       5. Investment Advice (投資建議)
       6. Investment Strategy (投資策略 - 短/中/長期買賣、止盈、止損)
@@ -168,7 +310,13 @@ export default function App() {
         "companyName": "...",
         "executiveSummary": "...",
         "comprehensiveAnalysis": "...",
-        "keyMetrics": [{"label": "...", "value": "...", "meaning": "..."}],
+        "keyMetrics": [
+          {"label": "市盈率 (P/E)", "value": "...", "meaning": "...", "rating": "..."},
+          {"label": "每股收益 (EPS)", "value": "...", "meaning": "...", "rating": "..."},
+          {"label": "市值", "value": "...", "meaning": "...", "rating": "..."},
+          {"label": "股息率", "value": "...", "meaning": "...", "rating": "..."},
+          {"label": "...", "value": "...", "meaning": "...", "rating": "..."}
+        ],
         "swot": {"pros": ["..."], "cons": ["..."]},
         "investmentAdvice": {"suitableFor": "...", "notSuitableFor": "...", "tips": ["..."], "monitoringPoints": ["..."]},
         "investmentStrategy": {"short": "...", "medium": "...", "long": "...", "takeProfit": "...", "stopLoss": "..."},
@@ -176,15 +324,15 @@ export default function App() {
       }
       `;
 
-      const reportResponse = await retryWithBackoff(() => ai.models.generateContent({
+      const reportResponse = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: reportPrompt,
         config: {
           responseMimeType: "application/json",
         },
-      }));
+      });
 
-      setRetailReport(JSON.parse(reportResponse.text || '{}'));
+      setRetailReport(safeJsonParse(reportResponse.text || '', {}));
       setAnalysis(''); // Clear old analysis as it's now merged
       
     } catch (error) {
@@ -201,7 +349,7 @@ export default function App() {
     const input = chatInput;
     setChatInput('');
     try {
-      const response = await retryWithBackoff<GenerateContentResponse>(() => chatSession.sendMessage({ message: input }));
+      const response = await chatSession.sendMessage({ message: input });
       setChatMessages(prev => [...prev, { role: 'model', text: response.text || '' }]);
     } catch (error) {
       console.error(error);
@@ -227,10 +375,10 @@ export default function App() {
         
         報告內容：${JSON.stringify(retailReport)}
       `;
-      const response = await retryWithBackoff(() => ai.models.generateContent({
+      const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: prompt,
-      }));
+      });
       setQaResponse(response.text || '無法獲取回答。');
     } catch (error) {
       console.error(error);
@@ -282,22 +430,6 @@ export default function App() {
         
         <div className="space-y-6 bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-zinc-200">
           <div>
-            <label className="block text-sm font-medium text-zinc-700 mb-2">风险承受度</label>
-            <select value={userPreferences.riskTolerance} onChange={(e) => setUserPreferences({...userPreferences, riskTolerance: e.target.value})} className="w-full p-3 border border-zinc-300 rounded-xl bg-white">
-              <option value="low">低</option>
-              <option value="moderate">中</option>
-              <option value="high">高</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-zinc-700 mb-2">投资目标</label>
-            <select value={userPreferences.investmentGoal} onChange={(e) => setUserPreferences({...userPreferences, investmentGoal: e.target.value})} className="w-full p-3 border border-zinc-300 rounded-xl bg-white">
-              <option value="growth">增长</option>
-              <option value="income">收益</option>
-              <option value="preservation">保值</option>
-            </select>
-          </div>
-          <div>
             <label className="block text-sm font-medium text-zinc-700 mb-2">股票代码</label>
             <input
               type="text"
@@ -334,85 +466,205 @@ export default function App() {
           {price !== null && (
             <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-zinc-200">
               <h3 className="text-lg font-semibold mb-2">实时价格: {price.toFixed(2)}</h3>
+              <div className="flex gap-2 mb-4">
+                <input type="number" placeholder="目标价格" id="targetPrice" className="p-2 border rounded" />
+                <select id="alertType" className="p-2 border rounded">
+                  <option value="above">高于</option>
+                  <option value="below">低于</option>
+                </select>
+                <button onClick={() => {
+                  const targetPrice = parseFloat((document.getElementById('targetPrice') as HTMLInputElement).value);
+                  const type = (document.getElementById('alertType') as HTMLSelectElement).value as 'above' | 'below';
+                  if (!isNaN(targetPrice)) {
+                    setAlerts([...alerts, { symbol, targetPrice, type }]);
+                    toast.info(`Alert set for ${symbol} at ${targetPrice}`);
+                  }
+                }} className="bg-emerald-500 text-white px-4 py-2 rounded">设置提醒</button>
+              </div>
               <StockChart data={history} />
             </div>
           )}
 
           {fundamentalData && (
             <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-zinc-200">
-              <h3 className="text-lg font-semibold mb-4">基本面分析</h3>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <p className="text-sm text-zinc-500">市盈率 (P/E)</p>
-                  <p className="font-medium">{fundamentalData.summaryDetail?.trailingPE ? fundamentalData.summaryDetail.trailingPE.toFixed(2) : '暂无数据'}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-zinc-500">每股收益 (EPS)</p>
-                  <p className="font-medium">{fundamentalData.defaultKeyStatistics?.trailingEps ? fundamentalData.defaultKeyStatistics.trailingEps.toFixed(2) : '暂无数据'}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-zinc-500">市值 (Market Cap)</p>
-                  <p className="font-medium">{fundamentalData.summaryDetail?.marketCap ? (fundamentalData.summaryDetail.marketCap / 1e9).toFixed(2) + ' B' : '暂无数据'}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-zinc-500">股息率 (Dividend Yield)</p>
-                  <p className="font-medium">{fundamentalData.summaryDetail?.dividendYield ? (fundamentalData.summaryDetail.dividendYield * 100).toFixed(2) + '%' : '暂无数据'}</p>
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-xl font-bold text-zinc-900">全面基本面深度分析</h3>
+                <div className="flex gap-2">
+                  <span className="px-2 py-1 bg-emerald-100 text-emerald-700 text-xs font-medium rounded">專業版</span>
                 </div>
               </div>
-              <div className="mt-4">
-                <p className="text-sm text-zinc-500">财务健康总结</p>
-                <p className="text-sm text-zinc-700 mt-1">
-                  {fundamentalData.financialData?.recommendationKey || '暂无数据'}
-                </p>
+
+              {/* Red Flags Section */}
+              {getRedFlags(fundamentalData).length > 0 && (
+                <div className="mb-8 space-y-2">
+                  {getRedFlags(fundamentalData).map((flag, i) => (
+                    <div key={i} className={`p-3 rounded-xl flex items-center gap-3 ${flag.type === 'danger' ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-amber-50 text-amber-700 border border-amber-100'}`}>
+                      <span className="text-lg">{flag.type === 'danger' ? '🚩' : '⚠️'}</span>
+                      <span className="text-sm font-medium">{flag.message}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="space-y-8">
+                {/* 1. Profitability */}
+                <section>
+                  <h4 className="text-sm font-bold text-zinc-400 uppercase tracking-wider mb-4">1. 獲利能力 (Profitability)</h4>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                    <MetricCard 
+                      title="毛利率 (Gross Margin)" 
+                      value={formatPercent(fundamentalData.financialData?.grossMargins)}
+                      explanation="扣除直接成本後的獲利比例。越高代表產品競爭力越強。"
+                    />
+                    <MetricCard 
+                      title="營業利益率 (Op Margin)" 
+                      value={formatPercent(fundamentalData.financialData?.operatingMargins)}
+                      explanation="扣除營運費用後的獲利能力，反映核心業務健康度。"
+                    />
+                    <MetricCard 
+                      title="淨利率 (Net Margin)" 
+                      value={formatPercent(fundamentalData.financialData?.profitMargins)}
+                      explanation="最終到股東手中的獲利比例。受稅率和利息影響。"
+                    />
+                    <MetricCard 
+                      title="ROE (股東權益報酬率)" 
+                      value={formatPercent(fundamentalData.financialData?.returnOnEquity)}
+                      interpretation={getROEInterpretation(fundamentalData.financialData?.returnOnEquity)}
+                      explanation="公司用股東的錢賺錢的效率。巴菲特建議 > 15%。"
+                    />
+                    <MetricCard 
+                      title="ROA (資產報酬率)" 
+                      value={formatPercent(fundamentalData.financialData?.returnOnAssets)}
+                      explanation="每元資產創造的淨利，衡量資產運用效率。"
+                    />
+                  </div>
+                </section>
+
+                {/* 2. Liquidity & Solvency */}
+                <section>
+                  <h4 className="text-sm font-bold text-zinc-400 uppercase tracking-wider mb-4">2. 償債能力 (Solvency)</h4>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                    <MetricCard 
+                      title="流動比率 (Current Ratio)" 
+                      value={fundamentalData.financialData?.currentRatio?.toFixed(2) || 'N/A'}
+                      explanation="短期資產能否覆蓋短期負債。> 1.5 較安全。"
+                    />
+                    <MetricCard 
+                      title="負債權益比 (D/E)" 
+                      value={fundamentalData.financialData?.debtToEquity?.toFixed(2) || 'N/A'}
+                      explanation="總負債與股東權益的比值。越高代表槓桿越高，風險越大。"
+                    />
+                  </div>
+                </section>
+
+                {/* 3. Valuation */}
+                <section>
+                  <h4 className="text-sm font-bold text-zinc-400 uppercase tracking-wider mb-4">3. 估值指標 (Valuation)</h4>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                    <MetricCard 
+                      title="本益比 (P/E)" 
+                      value={fundamentalData.summaryDetail?.trailingPE?.toFixed(2) || 'N/A'}
+                      interpretation={getPEInterpretation(fundamentalData.summaryDetail?.trailingPE)}
+                      explanation="回本年期。17.87 代表假設利潤不變，需 17.87 年回本。越低越便宜。"
+                    />
+                    <MetricCard 
+                      title="本淨比 (P/B)" 
+                      value={fundamentalData.defaultKeyStatistics?.priceToBook?.toFixed(2) || 'N/A'}
+                      explanation="股價與每股淨值的比率。通常 < 1.5 代表具備安全邊際。"
+                    />
+                    <MetricCard 
+                      title="PEG 比率" 
+                      value={fundamentalData.defaultKeyStatistics?.pegRatio?.toFixed(2) || 'N/A'}
+                      explanation="考慮成長性的本益比。 < 1 代表估值合理且具成長潛力。"
+                    />
+                    <MetricCard 
+                      title="市值 (Market Cap)" 
+                      value={formatCompact(fundamentalData.summaryDetail?.marketCap)}
+                      explanation="公司的總價值（股價 × 總股數）。"
+                    />
+                    <MetricCard 
+                      title="股息率 (Yield)" 
+                      value={formatPercent(fundamentalData.summaryDetail?.dividendYield)}
+                      explanation="公司每年派發的股息與股價的比率。類似存款利息。"
+                    />
+                  </div>
+                </section>
+
+                <div className="mt-8 p-4 bg-emerald-50 rounded-2xl border border-emerald-100">
+                  <h4 className="text-sm font-bold text-emerald-800 mb-2 flex items-center gap-2">
+                    <BrainCircuit className="w-4 h-4" /> 小白科普：如何判斷數字是否合理？
+                  </h4>
+                  <div className="space-y-3 text-xs text-emerald-700 leading-relaxed">
+                    <p>
+                      <strong>1. 市盈率 (P/E) 17.87 是什麼意思？</strong><br />
+                      簡單來說，這代表「回本年期」。假設公司利潤不變，你現在買入股票，需要 17.87 年才能靠利潤賺回本金。通常 15-20 倍被視為合理，但高成長股（如科技股）可能高達 50 倍，而成熟股（如銀行）可能只有 8-10 倍。
+                    </p>
+                    <p>
+                      <strong>2. 為什麼要看 ROE？</strong><br />
+                      ROE 代表公司用股東的錢賺錢的能力。如果 ROE 是 15%，代表公司每用股東 100 元，一年能賺 15 元。這是衡量公司「賺錢效率」最重要的指標。
+                    </p>
+                    <p>
+                      <strong>3. 償債能力重要嗎？</strong><br />
+                      非常重要！如果「流動比率」小於 1，代表公司手頭現金不足以支付一年內到期的債務，有破產風險。
+                    </p>
+                  </div>
+                </div>
+
+                <div className="pt-6 border-t border-zinc-100">
+                  <p className="text-xs text-zinc-400 leading-relaxed italic">
+                    * 數據來源：Yahoo Finance。所有指標應結合行業背景與歷史趨勢進行綜合判斷。高 ROE 伴隨高負債可能隱藏風險。
+                  </p>
+                </div>
               </div>
             </div>
           )}
-            {newsWithSentiment.length > 0 && (
-              <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-zinc-200">
-                <h3 className="text-lg font-semibold mb-4">新闻情绪分析</h3>
-                <div className="space-y-4">
-                  {newsWithSentiment.map((news: any, i: number) => (
-                    <div key={i} className="p-4 bg-zinc-50 rounded-lg border border-zinc-100">
-                      <div className="flex justify-between items-center mb-2">
-                        <p className="text-sm font-medium text-zinc-900">{news.title}</p>
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${news.sentiment === 'positive' ? 'bg-emerald-100 text-emerald-700' : news.sentiment === 'negative' ? 'bg-red-100 text-red-700' : 'bg-zinc-200 text-zinc-700'}`}>
-                          {news.sentiment === 'positive' ? '正面' : news.sentiment === 'negative' ? '负面' : '中性'}
-                        </span>
-                      </div>
-                      <p className="text-xs text-zinc-600 mb-1"><strong>未来方向:</strong> {news.futureDirection || 'N/A'}</p>
-                      <p className="text-xs text-zinc-600 mb-1"><strong>好处:</strong> {news.impactPros || 'N/A'}</p>
-                      <p className="text-xs text-zinc-600 mb-1"><strong>坏处:</strong> {news.impactCons || 'N/A'}</p>
-                      <p className="text-xs text-zinc-600"><strong>大众看法:</strong> {news.publicOpinion || 'N/A'}</p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
 
-            {/* Full News List Section */}
-            {rawNews.length > 0 && (
-              <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-zinc-200">
-                <h3 className="text-lg font-semibold mb-4">最新新闻列表</h3>
-                <div className="space-y-2">
-                  {rawNews.map((news: any, i: number) => (
-                    <div key={i} className="p-3 bg-zinc-50 rounded-lg border border-zinc-100 flex justify-between items-center">
-                      <a 
-                        href={news.url} 
-                        target="_blank" 
-                        rel="noopener noreferrer" 
-                        className="text-sm text-zinc-700 hover:text-emerald-600 hover:underline"
-                      >
-                        {news.title}
-                      </a>
-                      <p className="text-xs text-zinc-400 whitespace-nowrap ml-4">
-                        {news.date || 'N/A'}
-                      </p>
+          {newsWithSentiment.length > 0 && (
+            <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-zinc-200">
+              <h3 className="text-lg font-semibold mb-4">新聞情緒分析</h3>
+              <div className="space-y-4">
+                {newsWithSentiment.map((news: any, i: number) => (
+                  <div key={i} className="p-4 bg-zinc-50 rounded-lg border border-zinc-100">
+                    <div className="flex justify-between items-center mb-2">
+                      <p className="text-sm font-medium text-zinc-900">{news.title}</p>
+                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${news.sentiment === 'positive' ? 'bg-emerald-100 text-emerald-700' : news.sentiment === 'negative' ? 'bg-red-100 text-red-700' : 'bg-zinc-200 text-zinc-700'}`}>
+                        {news.sentiment === 'positive' ? '正面' : news.sentiment === 'negative' ? '負面' : '中性'}
+                      </span>
                     </div>
-                  ))}
-                </div>
+                    <p className="text-xs text-zinc-600 mb-1"><strong>未來方向:</strong> {news.futureDirection || 'N/A'}</p>
+                    <p className="text-xs text-zinc-600 mb-1"><strong>好處:</strong> {news.impactPros || 'N/A'}</p>
+                    <p className="text-xs text-zinc-600 mb-1"><strong>壞處:</strong> {news.impactCons || 'N/A'}</p>
+                    <p className="text-xs text-zinc-600"><strong>大眾看法:</strong> {news.publicOpinion || 'N/A'}</p>
+                  </div>
+                ))}
               </div>
-            )}
-          </div>
+            </div>
+          )}
+
+          {/* Full News List Section */}
+          {rawNews.length > 0 && (
+            <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-zinc-200">
+              <h3 className="text-lg font-semibold mb-4">最新新聞列表</h3>
+              <div className="space-y-2">
+                {rawNews.map((news: any, i: number) => (
+                  <div key={i} className="p-3 bg-zinc-50 rounded-lg border border-zinc-100 flex justify-between items-center">
+                    <a 
+                      href={news.url} 
+                      target="_blank" 
+                      rel="noopener noreferrer" 
+                      className="text-sm text-zinc-700 hover:text-emerald-600 hover:underline"
+                    >
+                      {news.title}
+                    </a>
+                    <p className="text-xs text-zinc-400 whitespace-nowrap ml-4">
+                      {news.date || 'N/A'}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
 
         {retailReport && (
           <motion.div 
@@ -420,61 +672,43 @@ export default function App() {
             animate={{ opacity: 1, y: 0 }} 
             className="mt-8 bg-white p-6 rounded-2xl shadow-sm border border-zinc-200 space-y-6"
           >
-            <h2 className="text-2xl font-bold text-zinc-900">{retailReport.companyName || symbol} 简易专业分析报告</h2>
+            <h2 className="text-2xl font-bold text-zinc-900">{retailReport.companyName || symbol} 簡易專業分析報告</h2>
             
             <section>
-              <h3 className="text-lg font-semibold mb-2">1. 一分钟看懂成绩单（执行摘要）</h3>
+              <h3 className="text-lg font-semibold mb-2">1. 一分鐘看懂成績單（執行摘要）</h3>
               <p className="text-zinc-700">{retailReport.executiveSummary}</p>
             </section>
 
             <section>
-              <h3 className="text-lg font-semibold mb-2">2. 综合技术与基本面分析</h3>
+              <h3 className="text-lg font-semibold mb-2">2. 綜合技術與基本面分析</h3>
               <p className="text-zinc-700 whitespace-pre-wrap">{retailReport.comprehensiveAnalysis}</p>
             </section>
 
             <section>
-              <h3 className="text-lg font-semibold mb-2">3. 关键数据表现</h3>
+              <h3 className="text-lg font-semibold mb-2">3. 關鍵數據表現</h3>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm text-left">
                   <thead className="text-xs text-zinc-700 uppercase bg-zinc-50">
                     <tr>
-                      <th className="px-4 py-2">指标</th>
-                      <th className="px-4 py-2">成绩</th>
-                      <th className="px-4 py-2">意义</th>
+                      <th className="px-4 py-2">指標</th>
+                      <th className="px-4 py-2">成績</th>
+                      <th className="px-4 py-2">意義</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {/* Fundamental Data Integration */}
-                    {fundamentalData && (
-                      <>
-                        <tr className="bg-white border-b">
-                          <td className="px-4 py-2 font-medium">市盈率 (P/E)</td>
-                          <td className="px-4 py-2">{fundamentalData.summaryDetail?.trailingPE ? fundamentalData.summaryDetail.trailingPE.toFixed(2) : '暂无数据'}</td>
-                          <td className="px-4 py-2">衡量股价是否合理</td>
-                        </tr>
-                        <tr className="bg-white border-b">
-                          <td className="px-4 py-2 font-medium">每股收益 (EPS)</td>
-                          <td className="px-4 py-2">{fundamentalData.defaultKeyStatistics?.trailingEps ? fundamentalData.defaultKeyStatistics.trailingEps.toFixed(2) : '暂无数据'}</td>
-                          <td className="px-4 py-2">每股盈利能力</td>
-                        </tr>
-                        <tr className="bg-white border-b">
-                          <td className="px-4 py-2 font-medium">市值</td>
-                          <td className="px-4 py-2">{fundamentalData.summaryDetail?.marketCap ? (fundamentalData.summaryDetail.marketCap / 1e9).toFixed(2) + ' B' : '暂无数据'}</td>
-                          <td className="px-4 py-2">公司总规模</td>
-                        </tr>
-                        <tr className="bg-white border-b">
-                          <td className="px-4 py-2 font-medium">股息率</td>
-                          <td className="px-4 py-2">{fundamentalData.summaryDetail?.dividendYield ? (fundamentalData.summaryDetail.dividendYield * 100).toFixed(2) + '%' : '暂无数据'}</td>
-                          <td className="px-4 py-2">分红回报率</td>
-                        </tr>
-                      </>
-                    )}
                     {/* Report Specific Metrics */}
                     {retailReport.keyMetrics?.map((m: any, i: number) => (
                       <tr key={i} className="bg-white border-b">
-                        <td className="px-4 py-2 font-medium">{m.label}</td>
-                        <td className="px-4 py-2">{m.value}</td>
-                        <td className="px-4 py-2">{m.meaning}</td>
+                        <td className="px-4 py-4 font-medium align-top">{m.label}</td>
+                        <td className="px-4 py-4 align-top">
+                          <div className="font-semibold text-zinc-900 mb-1">{m.value}</div>
+                          {m.rating && (
+                            <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold border ${getRatingColor(m.rating)}`}>
+                              {m.rating}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-4 text-zinc-600 leading-relaxed">{m.meaning}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -490,7 +724,7 @@ export default function App() {
                 </ul>
               </div>
               <div>
-                <h3 className="text-lg font-semibold mb-2 text-red-700">风险提示</h3>
+                <h3 className="text-lg font-semibold mb-2 text-red-700">風險提示</h3>
                 <ul className="list-disc list-inside text-sm text-zinc-700 space-y-1">
                   {retailReport.swot?.cons?.map((c: string, i: number) => <li key={i}>{c}</li>)}
                 </ul>
@@ -498,15 +732,15 @@ export default function App() {
             </section>
 
             <section>
-              <h3 className="text-lg font-semibold mb-2">5. 投资建议</h3>
+              <h3 className="text-lg font-semibold mb-2">5. 投資建議</h3>
               <div className="text-sm text-zinc-700 space-y-2">
-                <p><strong>适合谁：</strong> {retailReport.investmentAdvice?.suitableFor}</p>
-                <p><strong>不适合谁：</strong> {retailReport.investmentAdvice?.notSuitableFor}</p>
-                <p><strong>操作建议：</strong></p>
+                <p><strong>適合誰：</strong> {retailReport.investmentAdvice?.suitableFor}</p>
+                <p><strong>不適合誰：</strong> {retailReport.investmentAdvice?.notSuitableFor}</p>
+                <p><strong>操作建議：</strong></p>
                 <ul className="list-disc list-inside space-y-1">
                   {retailReport.investmentAdvice?.tips?.map((t: string, i: number) => <li key={i}>{t}</li>)}
                 </ul>
-                <p><strong>监控重点：</strong></p>
+                <p><strong>監控重點：</strong></p>
                 <ul className="list-disc list-inside space-y-1">
                   {retailReport.investmentAdvice?.monitoringPoints?.map((p: string, i: number) => <li key={i}>{p}</li>)}
                 </ul>
@@ -525,19 +759,19 @@ export default function App() {
             </section>
 
             <section>
-              <h3 className="text-lg font-semibold mb-2">总结</h3>
+              <h3 className="text-lg font-semibold mb-2">總結</h3>
               <p className="text-zinc-700 font-medium">{retailReport.conclusion}</p>
             </section>
 
             {/* AI Q&A Section */}
             <section className="mt-8 pt-6 border-t border-zinc-200">
-              <h3 className="text-lg font-semibold mb-4">AI 智能问答</h3>
+              <h3 className="text-lg font-semibold mb-4">AI 智能問答</h3>
               <div className="space-y-4">
                 <input
                   type="text"
                   value={qaInput}
                   onChange={(e) => setQaInput(e.target.value)}
-                  placeholder="针对此报告提问..."
+                  placeholder="針對此報告提問..."
                   className="w-full p-3 border border-zinc-300 rounded-xl"
                 />
                 <button 
@@ -545,7 +779,7 @@ export default function App() {
                   disabled={qaLoading} 
                   className="w-full bg-emerald-500 text-white p-3 rounded-xl font-medium hover:bg-emerald-600 disabled:opacity-50 transition-colors"
                 >
-                  {qaLoading ? '思考中...' : '提问'}
+                  {qaLoading ? '思考中...' : '提問'}
                 </button>
                 {qaResponse && (
                   <div className="p-4 bg-zinc-100 rounded-xl whitespace-pre-wrap text-zinc-700 text-sm">
@@ -563,7 +797,7 @@ export default function App() {
             animate={{ opacity: 1, y: 0 }} 
             className="mt-8 bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-zinc-200"
           >
-            <h3 className="text-lg font-semibold mb-2">综合技术与基本面分析</h3>
+            <h3 className="text-lg font-semibold mb-2">綜合技術與基本面分析</h3>
             <p className="text-zinc-700 whitespace-pre-wrap">{analysis}</p>
           </motion.div>
         )}
@@ -574,11 +808,12 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-zinc-50 flex flex-col md:flex-row font-sans">
+      <Toaster />
       {/* Mobile Header */}
       <header className="md:hidden bg-white border-b border-zinc-200 p-4 flex items-center justify-between">
         <h1 className="text-lg font-bold text-zinc-900 flex items-center gap-2">
           <TrendingUp className="text-emerald-500" />
-          AI投资分析
+          AI投資分析
         </h1>
         <button onClick={() => setIsMenuOpen(!isMenuOpen)}>
           {isMenuOpen ? <X /> : <Menu />}
@@ -589,11 +824,11 @@ export default function App() {
       <aside className={`${isMenuOpen ? 'block' : 'hidden'} md:block w-full md:w-64 bg-white border-r border-zinc-200 p-6`}>
         <h1 className="hidden md:flex text-xl font-bold text-zinc-900 mb-8 items-center gap-2">
           <TrendingUp className="text-emerald-500" />
-          AI投资分析工具
+          AI投資分析工具
         </h1>
         
         <nav className="space-y-2">
-          <p className="text-sm text-zinc-500 mb-2">选择功能</p>
+          <p className="text-sm text-zinc-500 mb-2">選擇功能</p>
           {FEATURES.map((feature) => (
             <button
               key={feature.id}

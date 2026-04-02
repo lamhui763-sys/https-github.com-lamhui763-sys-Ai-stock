@@ -29,6 +29,7 @@ export default function App() {
   const [fundamentalData, setFundamentalData] = useState<any>(null);
   const [newsWithSentiment, setNewsWithSentiment] = useState<any[]>([]);
   const [rawNews, setRawNews] = useState<any[]>([]);
+  const [realTimeNews, setRealTimeNews] = useState<any[]>([]);
 
   const getRedFlags = (data: any) => {
     const flags = [];
@@ -57,38 +58,76 @@ export default function App() {
 
   const safeJsonParse = (str: string, fallback: any = {}) => {
     try {
-      // Clean up the string: remove markdown code blocks if present
       let cleanStr = str.trim();
-      if (cleanStr.startsWith('```json')) {
-        cleanStr = cleanStr.replace(/^```json/, '').replace(/```$/, '').trim();
-      } else if (cleanStr.startsWith('```')) {
-        cleanStr = cleanStr.replace(/^```/, '').replace(/```$/, '').trim();
-      }
+      // Clean up the string: remove markdown code blocks if present
+      cleanStr = cleanStr.replace(/^```json\s*/, '').replace(/```$/, '').trim();
       
-      // Try to find the first '{' and last '}' to extract just the JSON object
+      // Find the first '{' or '[' to start parsing
       const firstBrace = cleanStr.indexOf('{');
-      const lastBrace = cleanStr.lastIndexOf('}');
       const firstBracket = cleanStr.indexOf('[');
-      const lastBracket = cleanStr.lastIndexOf(']');
       
       let startIndex = -1;
-      let endIndex = -1;
-      
       if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
         startIndex = firstBrace;
-        endIndex = lastBrace;
       } else if (firstBracket !== -1) {
         startIndex = firstBracket;
-        endIndex = lastBracket;
       }
       
-      if (startIndex !== -1 && endIndex !== -1 && endIndex > startIndex) {
+      if (startIndex === -1) return fallback;
+      
+      // Find the matching end brace/bracket by tracking nesting and ignoring strings
+      let openChar = cleanStr[startIndex];
+      let closeChar = openChar === '{' ? '}' : ']';
+      let count = 0;
+      let inString = false;
+      let escaped = false;
+      let endIndex = -1;
+      
+      for (let i = startIndex; i < cleanStr.length; i++) {
+        const char = cleanStr[i];
+        
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        
+        if (char === '\\') {
+          escaped = true;
+          continue;
+        }
+        
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+        
+        if (!inString) {
+          if (char === openChar) count++;
+          else if (char === closeChar) count--;
+          
+          if (count === 0) {
+            endIndex = i;
+            break;
+          }
+        }
+      }
+      
+      if (endIndex !== -1) {
         cleanStr = cleanStr.substring(startIndex, endIndex + 1);
       }
       
       return JSON.parse(cleanStr);
     } catch (e) {
       console.error("Failed to parse JSON:", e, "Original string:", str);
+      // Last resort: try simple substring if robust parsing failed
+      try {
+        const s = str.trim().replace(/^```json\s*/, '').replace(/```$/, '').trim();
+        const first = Math.min(s.indexOf('{') === -1 ? Infinity : s.indexOf('{'), s.indexOf('[') === -1 ? Infinity : s.indexOf('['));
+        const last = Math.max(s.lastIndexOf('}'), s.lastIndexOf(']'));
+        if (first !== Infinity && last !== -1 && last > first) {
+          return JSON.parse(s.substring(first, last + 1));
+        }
+      } catch (e2) {}
       return fallback;
     }
   };
@@ -116,6 +155,15 @@ export default function App() {
       case '一般': return 'text-zinc-600 bg-zinc-50 border-zinc-100';
       case '較差': return 'text-orange-600 bg-orange-50 border-orange-100';
       case '十分差': return 'text-red-600 bg-red-50 border-red-100';
+      default: return 'text-zinc-500 bg-zinc-50 border-zinc-100';
+    }
+  };
+
+  const getRiskLevelColor = (level: string) => {
+    switch (level) {
+      case '高': return 'text-red-600 bg-red-50 border-red-100';
+      case '中': return 'text-orange-600 bg-orange-50 border-orange-100';
+      case '低': return 'text-emerald-600 bg-emerald-50 border-emerald-100';
       default: return 'text-zinc-500 bg-zinc-50 border-zinc-100';
     }
   };
@@ -152,11 +200,11 @@ export default function App() {
   const [chatSession, setChatSession] = useState<any>(null);
 
   useEffect(() => {
-    const newSocket = io(window.location.origin, {
+    const newSocket = io({
       transports: ['websocket'],
       withCredentials: true,
-      reconnectionAttempts: 5,
-      timeout: 20000
+      reconnectionAttempts: 10,
+      timeout: 30000
     });
     setSocket(newSocket);
     const apiKey = process.env.GEMINI_API_KEY;
@@ -195,6 +243,45 @@ export default function App() {
     }
   }, [socket, symbol, alerts]);
 
+  const analyzeNewsSentiment = async (newsItems: any[], stockSymbol: string) => {
+    if (newsItems.length === 0) return [];
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return [];
+    const ai = new GoogleGenAI({ apiKey });
+    
+    const prompt = `
+      分析以下關於股票 ${stockSymbol} 的新聞情緒。
+      對於每一項，請提供：
+      1. title: 原始標題。
+      2. sentiment: "positive", "negative", 或 "neutral"。
+      3. summary: 一句非常簡短的繁體中文摘要。
+      
+      新聞列表：
+      ${newsItems.map((item, i) => `${i+1}. ${item.title}`).join('\n')}
+      
+      請以 JSON 格式輸出：
+      {
+        "analysis": [
+          { "title": "...", "sentiment": "...", "summary": "..." },
+          ...
+        ]
+      }
+    `;
+
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: prompt,
+        config: { responseMimeType: "application/json" },
+      });
+      const parsed = safeJsonParse(response.text || '', { analysis: [] });
+      return parsed.analysis;
+    } catch (error) {
+      console.error("Sentiment analysis failed:", error);
+      return newsItems.map(item => ({ title: item.title, sentiment: 'neutral', summary: '無法分析情緒' }));
+    }
+  };
+
   const handleSearch = async () => {
     setLoading(true);
     try {
@@ -219,21 +306,40 @@ export default function App() {
         socket.emit('subscribe', symbol);
       }
 
-      // 2. Use Google Search Grounding to get high-quality news
+      // 2. Fetch real-time news from API and analyze sentiment
+      console.log(`Fetching real-time news for ${symbol}...`);
+      const newsApiUrl = `/api/news/${encodeURIComponent(symbol)}`;
+      const newsApiResponse = await fetch(newsApiUrl);
+      if (newsApiResponse.ok) {
+        const newsData = await newsApiResponse.json();
+        const analyzedNews = await analyzeNewsSentiment(newsData.slice(0, 5), symbol);
+        setRealTimeNews(analyzedNews);
+      }
+
+      // 3. Use Google Search Grounding to get high-quality news
       const newsQuery = `${symbol} 近两日的重要新闻，包含股份回购、业务动态、AI布局、大宗交易等`;
       
       let newsResponse;
-      try {
-        newsResponse = await ai.models.generateContent({
-          model: "gemini-3-flash-preview",
-          contents: newsQuery,
-          config: {
-            tools: [{ googleSearch: {} }],
-          },
-        });
-      } catch (searchError) {
-        console.error("News search failed:", searchError);
-        newsResponse = { text: "新闻搜索服务暂时不可用，无法获取最新新闻。" };
+      let retries = 3;
+      while (retries > 0) {
+        try {
+          newsResponse = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: newsQuery,
+            config: {
+              tools: [{ googleSearch: {} }],
+            },
+          });
+          break; // Success
+        } catch (searchError) {
+          console.error(`News search attempt failed (${retries} left):`, searchError);
+          retries--;
+          if (retries === 0) {
+            newsResponse = { text: "新闻搜索服务暂时不可用，无法获取最新新闻。请稍后再试。" };
+          } else {
+            await new Promise(resolve => setTimeout(resolve, 2000)); // Wait before retry
+          }
+        }
       }
 
       // 3. Analyze sentiment and structure the output
@@ -304,6 +410,7 @@ export default function App() {
          - Example for P/E: "目前 17.81 倍代表回本期約 18 年，在科技行業中屬於合理偏低水平，顯示股價尚未過度泡沫。"
          - NEW: For each metric, provide a 'rating' field. The value MUST be one of: "十分優秀", "優秀", "良好", "合理", "一般", "較差", "十分差".
       4. SWOT Analysis (好消息與風險提示)
+         - IMPORTANT: For each risk in 'cons', provide a 'level' (低/中/高) and a 'basis' (評估依據).
       5. Investment Advice (投資建議)
       6. Investment Strategy (投資策略 - 短/中/長期買賣、止盈、止損)
          - IMPORTANT: For short, medium, and long-term strategies, provide specific buy/sell point descriptions, target price ranges, and corresponding risk warnings.
@@ -326,7 +433,12 @@ export default function App() {
           {"label": "股息率", "value": "...", "meaning": "...", "rating": "..."},
           {"label": "...", "value": "...", "meaning": "...", "rating": "..."}
         ],
-        "swot": {"pros": ["..."], "cons": ["..."]},
+        "swot": {
+          "pros": ["..."],
+          "cons": [
+            {"risk": "...", "level": "低/中/高", "basis": "..."}
+          ]
+        },
         "investmentAdvice": {"suitableFor": "...", "notSuitableFor": "...", "tips": ["..."], "monitoringPoints": ["..."]},
         "investmentStrategy": {
           "shortTerm": { "action": "...", "buyPoint": "...", "sellPoint": "...", "targetRange": "...", "riskWarning": "..." },
@@ -411,30 +523,91 @@ export default function App() {
     }
     if (selectedFeature === 'chat') {
       return (
-        <div className="max-w-2xl mx-auto h-[calc(100vh-100px)] flex flex-col">
-          <h2 className="text-2xl font-bold text-zinc-900 mb-6">AI 对话</h2>
-          <div className="flex-1 overflow-y-auto space-y-4 mb-4">
-            {chatMessages.map((msg, i) => (
-              <div key={i} className={`p-4 rounded-xl ${msg.role === 'user' ? 'bg-emerald-100 ml-auto' : 'bg-zinc-100'}`}>
-                {msg.text}
+        <div className="max-w-4xl mx-auto h-[calc(100vh-100px)] flex flex-col gap-6">
+          <div className="flex flex-col md:flex-row gap-6 flex-1 overflow-hidden">
+            {/* Chat Section */}
+            <div className="flex-1 flex flex-col bg-white rounded-2xl shadow-sm border border-zinc-200 overflow-hidden">
+              <div className="p-4 border-b border-zinc-100 flex items-center justify-between">
+                <h2 className="text-lg font-bold text-zinc-900">AI 智能對話</h2>
+                <span className="px-2 py-1 bg-emerald-100 text-emerald-700 text-[10px] font-bold rounded uppercase">Live</span>
               </div>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
-              placeholder="输入您的问题..."
-              className="flex-1 p-3 border border-zinc-300 rounded-xl"
-            />
-            <button 
-              onClick={handleChat} 
-              disabled={loading} 
-              className="bg-emerald-500 text-white p-3 rounded-xl font-medium hover:bg-emerald-600 disabled:opacity-50 transition-colors"
-            >
-              发送
-            </button>
+              <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                {chatMessages.length === 0 && (
+                  <div className="h-full flex flex-col items-center justify-center text-zinc-400 space-y-2">
+                    <BrainCircuit size={48} strokeWidth={1.5} />
+                    <p className="text-sm">您可以詢問關於 {symbol} 的任何問題</p>
+                  </div>
+                )}
+                {chatMessages.map((msg, i) => (
+                  <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[85%] p-3 rounded-2xl text-sm ${
+                      msg.role === 'user' 
+                        ? 'bg-emerald-500 text-white rounded-tr-none' 
+                        : 'bg-zinc-100 text-zinc-800 rounded-tl-none border border-zinc-200'
+                    }`}>
+                      {msg.text}
+                    </div>
+                  </div>
+                ))}
+                {loading && (
+                  <div className="flex justify-start">
+                    <div className="bg-zinc-100 text-zinc-400 p-3 rounded-2xl rounded-tl-none border border-zinc-200 text-sm animate-pulse">
+                      思考中...
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="p-4 border-t border-zinc-100 bg-zinc-50">
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleChat()}
+                    placeholder="輸入您的問題..."
+                    className="flex-1 p-3 border border-zinc-300 rounded-xl bg-white focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none transition-all"
+                  />
+                  <button 
+                    onClick={handleChat} 
+                    disabled={loading || !chatInput.trim()} 
+                    className="bg-emerald-500 text-white p-3 rounded-xl font-medium hover:bg-emerald-600 disabled:opacity-50 transition-all shadow-sm shadow-emerald-200"
+                  >
+                    發送
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Real-time News Sidebar */}
+            <div className="w-full md:w-80 flex flex-col bg-white rounded-2xl shadow-sm border border-zinc-200 overflow-hidden">
+              <div className="p-4 border-b border-zinc-100 flex items-center gap-2">
+                <Newspaper size={18} className="text-emerald-500" />
+                <h3 className="text-sm font-bold text-zinc-900">實時新聞情緒</h3>
+              </div>
+              <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                {realTimeNews.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-zinc-400 text-center p-4">
+                    <p className="text-xs italic">暫無實時新聞數據，請先搜索股票代碼。</p>
+                  </div>
+                ) : (
+                  realTimeNews.map((news, i) => (
+                    <div key={i} className="p-3 bg-zinc-50 rounded-xl border border-zinc-100 hover:border-emerald-200 transition-colors group">
+                      <div className="flex justify-between items-start gap-2 mb-2">
+                        <p className="text-xs font-bold text-zinc-900 leading-tight group-hover:text-emerald-700 transition-colors">{news.title}</p>
+                        <span className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
+                          news.sentiment === 'positive' ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' : 
+                          news.sentiment === 'negative' ? 'bg-red-100 text-red-700 border border-red-200' : 
+                          'bg-zinc-200 text-zinc-600 border border-zinc-300'
+                        }`}>
+                          {news.sentiment === 'positive' ? '利好' : news.sentiment === 'negative' ? '利空' : '中性'}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-zinc-500 leading-relaxed">{news.summary}</p>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
           </div>
         </div>
       );
@@ -751,9 +924,25 @@ export default function App() {
               </div>
               <div>
                 <h3 className="text-lg font-semibold mb-2 text-red-700">風險提示</h3>
-                <ul className="list-disc list-inside text-sm text-zinc-700 space-y-1">
-                  {retailReport.swot?.cons?.map((c: string, i: number) => <li key={i}>{c}</li>)}
-                </ul>
+                <div className="space-y-3">
+                  {retailReport.swot?.cons?.map((c: any, i: number) => (
+                    <div key={i} className="p-3 bg-red-50/50 rounded-xl border border-red-100/50">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-bold text-zinc-900">{typeof c === 'string' ? c : c.risk}</span>
+                        {c.level && (
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${getRiskLevelColor(c.level)}`}>
+                            風險：{c.level}
+                          </span>
+                        )}
+                      </div>
+                      {c.basis && (
+                        <p className="text-xs text-zinc-500 leading-relaxed">
+                          <strong>依據：</strong>{c.basis}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
             </section>
 

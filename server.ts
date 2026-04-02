@@ -66,8 +66,11 @@ async function startServer() {
       credentials: true
     },
     transports: ['websocket', 'polling'],
+    pingTimeout: 60000,
+    pingInterval: 25000,
     allowEIO3: true
   });
+
   const PORT = 3000;
 
   app.use((req, res, next) => {
@@ -83,13 +86,16 @@ async function startServer() {
 
   // Socket.io
   io.on("connection", (socket) => {
-    console.log("Client connected:", socket.id);
+    console.log("Socket.IO: Client connected:", socket.id);
     socket.on("subscribe", (symbol) => {
-      console.log(`Subscribing to ${symbol}`);
+      console.log(`Socket.IO: Subscribing to ${symbol}`);
       socket.join(symbol);
     });
     socket.on("disconnect", (reason) => {
-      console.log("Client disconnected:", socket.id, "Reason:", reason);
+      console.log("Socket.IO: Client disconnected:", socket.id, "Reason:", reason);
+    });
+    socket.on("error", (err) => {
+      console.error("Socket.IO: Socket error:", socket.id, err);
     });
   });
 

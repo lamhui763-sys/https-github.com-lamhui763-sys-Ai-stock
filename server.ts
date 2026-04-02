@@ -53,10 +53,13 @@ function calculateSMA(data: any[], period: number) {
 
 async function startServer() {
   const app = express();
-  app.use(cors({
+  
+  // Apply CORS only to API routes to avoid interfering with Socket.IO handshake
+  app.use("/api", cors({
     origin: true,
     credentials: true
   }));
+  
   app.use(express.json());
   const httpServer = http.createServer(app);
   const io = new Server(httpServer, {
@@ -66,9 +69,9 @@ async function startServer() {
       credentials: true
     },
     transports: ['websocket', 'polling'],
-    pingTimeout: 60000,
-    pingInterval: 25000,
-    allowEIO3: true
+    pingTimeout: 120000,
+    pingInterval: 30000,
+    connectTimeout: 60000
   });
 
   const PORT = 3000;
@@ -76,12 +79,6 @@ async function startServer() {
   app.use((req, res, next) => {
     console.log('Request:', req.method, req.url);
     next();
-  });
-
-  // Global error handler for the app
-  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    console.error('Unhandled Error:', err);
-    res.status(500).json({ error: 'Internal Server Error', message: err.message });
   });
 
   // Socket.io
@@ -99,20 +96,34 @@ async function startServer() {
     });
   });
 
-  // Periodic price updates
+  // Periodic price updates - less aggressive and more robust
   setInterval(async () => {
-    for (const room of io.sockets.adapter.rooms.keys()) {
-      if (room.startsWith('^') || room.length < 10) { // Simple check to avoid internal rooms
+    try {
+      const activeRooms = Array.from(io.sockets.adapter.rooms.keys())
+        .filter(room => !room.startsWith('^') && room.length < 10); // Simple check for stock symbols
+      
+      if (activeRooms.length === 0) return;
+      
+      console.log(`Socket.IO: Updating prices for ${activeRooms.length} active rooms...`);
+      
+      for (const room of activeRooms) {
         try {
-          const chartResult: any = await yahoo.chart(room, { period1: new Date(Date.now() - 86400000) });
-          const lastPrice = chartResult.quotes[chartResult.quotes.length - 1].close;
-          io.to(room).emit("priceUpdate", { symbol: room, price: lastPrice });
+          // Use a shorter period for periodic updates
+          const chartResult: any = await yahoo.chart(room, { period1: new Date(Date.now() - 3600000) });
+          if (chartResult && chartResult.quotes && chartResult.quotes.length > 0) {
+            const lastPrice = chartResult.quotes[chartResult.quotes.length - 1].close;
+            io.to(room).emit("priceUpdate", { symbol: room, price: lastPrice });
+          }
         } catch (e) {
-          console.error(`Error updating ${room}:`, e);
+          console.error(`Socket.IO: Error updating ${room}:`, e);
         }
+        // Add a small delay between requests to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
+    } catch (e) {
+      console.error('Socket.IO: Periodic update loop error:', e);
     }
-  }, 10000);
+  }, 30000); // Update every 30 seconds instead of 10
 
   // API routes
   app.get("/api/health", (req, res) => {
@@ -138,11 +149,11 @@ async function startServer() {
   app.get("/api/analyze/:symbol", async (req, res) => {
     const symbol = req.params.symbol;
     const { period } = req.query;
-    console.log('Received request for symbol:', symbol, 'Period:', period, 'URL:', req.url);
+    console.log(`[API] Received analyze request for: ${symbol} (Period: ${period})`);
     
-    if (!symbol) {
-      res.status(400).json({ error: 'No symbol provided' });
-      return;
+    if (!symbol || symbol === 'undefined') {
+      console.warn('[API] Missing or invalid symbol in request');
+      return res.status(400).json({ error: "Symbol is required" });
     }
     
     try {
@@ -483,6 +494,12 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  // Global error handler for the app - placed at the end
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error('Unhandled Error:', err);
+    res.status(500).json({ error: 'Internal Server Error', message: err.message });
+  });
 
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);

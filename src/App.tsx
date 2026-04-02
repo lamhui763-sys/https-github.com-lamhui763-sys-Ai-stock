@@ -52,9 +52,9 @@ export default function App() {
     return flags;
   };
 
-  const formatPercent = (val: any) => val ? (val * 100).toFixed(2) + '%' : 'N/A';
-  const formatNum = (val: any) => val ? val.toLocaleString() : 'N/A';
-  const formatCompact = (val: any) => val ? (val / 1e9).toFixed(2) + 'B' : 'N/A';
+  const formatPercent = (val: any) => (typeof val === 'number') ? (val * 100).toFixed(2) + '%' : 'N/A';
+  const formatNum = (val: any) => (typeof val === 'number') ? val.toLocaleString() : (val ?? 'N/A');
+  const formatCompact = (val: any) => (typeof val === 'number') ? (val / 1e9).toFixed(2) + 'B' : 'N/A';
 
   const safeJsonParse = (str: string, fallback: any = {}) => {
     try {
@@ -201,10 +201,25 @@ export default function App() {
 
   useEffect(() => {
     const newSocket = io({
-      transports: ['websocket'],
+      path: "/socket.io/",
+      transports: ['websocket', 'polling'],
       withCredentials: true,
-      reconnectionAttempts: 10,
-      timeout: 30000
+      reconnectionAttempts: 20,
+      reconnectionDelay: 2000,
+      timeout: 90000,
+      autoConnect: true
+    });
+
+    newSocket.on('connect', () => {
+      console.log('Socket connected successfully');
+    });
+
+    newSocket.on('connect_error', (err) => {
+      console.error('Socket connection error:', err.message);
+      // Only show toast for persistent errors
+      if (newSocket.active && !newSocket.connected) {
+        toast.error(`Socket connection error: ${err.message}`);
+      }
     });
     setSocket(newSocket);
     const apiKey = process.env.GEMINI_API_KEY;
@@ -233,9 +248,9 @@ export default function App() {
         alerts.forEach(alert => {
           if (alert.symbol === data.symbol) {
             if (alert.type === 'above' && data.price >= alert.targetPrice) {
-              toast.success(`Alert: ${data.symbol} reached ${data.price.toFixed(2)} (Target: ${alert.targetPrice})`);
+              toast.success(`Alert: ${data.symbol} reached ${typeof data.price === 'number' ? data.price.toFixed(2) : data.price} (Target: ${alert.targetPrice})`);
             } else if (alert.type === 'below' && data.price <= alert.targetPrice) {
-              toast.error(`Alert: ${data.symbol} dropped to ${data.price.toFixed(2)} (Target: ${alert.targetPrice})`);
+              toast.error(`Alert: ${data.symbol} dropped to ${typeof data.price === 'number' ? data.price.toFixed(2) : data.price} (Target: ${alert.targetPrice})`);
             }
           }
         });
@@ -253,16 +268,17 @@ export default function App() {
       分析以下關於股票 ${stockSymbol} 的新聞情緒。
       對於每一項，請提供：
       1. title: 原始標題。
-      2. sentiment: "positive", "negative", 或 "neutral"。
-      3. summary: 一句非常簡短的繁體中文摘要。
+      2. url: 原始連結。
+      3. sentiment: "positive", "negative", 或 "neutral"。
+      4. summary: 一個約 50 字的繁體中文簡明摘要，解釋該新聞對公司的具體影響。
       
       新聞列表：
-      ${newsItems.map((item, i) => `${i+1}. ${item.title}`).join('\n')}
+      ${newsItems.map((item, i) => `${i+1}. ${item.title} (URL: ${item.link})`).join('\n')}
       
       請以 JSON 格式輸出：
       {
         "analysis": [
-          { "title": "...", "sentiment": "...", "summary": "..." },
+          { "title": "...", "url": "...", "sentiment": "...", "summary": "..." },
           ...
         ]
       }
@@ -282,6 +298,35 @@ export default function App() {
     }
   };
 
+  const [deepSummary, setDeepSummary] = useState<{title: string, summary: string} | null>(null);
+  const [deepLoading, setDeepLoading] = useState(false);
+
+  const handleDeepSummary = async (newsTitle: string, newsUrl: string) => {
+    if (!newsUrl) return;
+    setDeepLoading(true);
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) throw new Error('GEMINI_API_KEY is missing');
+      const ai = new GoogleGenAI({ apiKey });
+      
+      const prompt = `請針對這篇新聞進行深度總結：${newsTitle}。請分析其對 ${symbol} 的長期影響。`;
+      
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: prompt,
+        config: {
+          tools: [{ urlContext: {} }],
+        },
+      });
+      
+      setDeepSummary({ title: newsTitle, summary: response.text || '無法獲取深度總結。' });
+    } catch (error) {
+      console.error("Deep summary failed:", error);
+      toast.error("深度總結失敗，請稍後再試。");
+    }
+    setDeepLoading(false);
+  };
+
   const handleSearch = async () => {
     setLoading(true);
     try {
@@ -289,12 +334,24 @@ export default function App() {
       if (!apiKey) throw new Error('GEMINI_API_KEY is missing');
       const ai = new GoogleGenAI({ apiKey });
 
-      // 1. Fetch stock data
+      // 1. Fetch stock data with retry
       console.log(`Fetching stock data for ${symbol}...`);
-      const analysisResponse = await fetch(`/api/analyze/${encodeURIComponent(symbol)}?period=${period}`);
-      if (!analysisResponse.ok) {
-        const errorData = await analysisResponse.json().catch(() => ({}));
-        throw new Error(errorData.message || errorData.error || `Failed to fetch stock data: ${analysisResponse.status}`);
+      let analysisResponse: Response | null = null;
+      let retries = 3;
+      while (retries > 0) {
+        try {
+          analysisResponse = await fetch(`/api/analyze/${encodeURIComponent(symbol)}?period=${period}`);
+          if (analysisResponse.ok) break;
+        } catch (e) {
+          console.error(`Fetch attempt failed (${retries} left):`, e);
+        }
+        retries--;
+        if (retries > 0) await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+
+      if (!analysisResponse || !analysisResponse.ok) {
+        const errorData = analysisResponse ? await analysisResponse.json().catch(() => ({})) : {};
+        throw new Error(errorData.message || errorData.error || `Failed to fetch stock data: ${analysisResponse?.status || 'Network Error'}`);
       }
       const data = await analysisResponse.json();
       console.log('Stock data received:', data);
@@ -320,8 +377,8 @@ export default function App() {
       const newsQuery = `${symbol} 近两日的重要新闻，包含股份回购、业务动态、AI布局、大宗交易等`;
       
       let newsResponse;
-      let retries = 3;
-      while (retries > 0) {
+      let newsRetries = 3;
+      while (newsRetries > 0) {
         try {
           newsResponse = await ai.models.generateContent({
             model: "gemini-3-flash-preview",
@@ -332,10 +389,10 @@ export default function App() {
           });
           break; // Success
         } catch (searchError) {
-          console.error(`News search attempt failed (${retries} left):`, searchError);
-          retries--;
-          if (retries === 0) {
-            newsResponse = { text: "新闻搜索服务暂时不可用，无法获取最新新闻。请稍后再试。" };
+          console.error(`News search attempt failed (${newsRetries} left):`, searchError);
+          newsRetries--;
+          if (newsRetries === 0) {
+            newsResponse = { text: "新闻搜索服务暂时不可用，无法获取最新新闻。請稍後再試。" };
           } else {
             await new Promise(resolve => setTimeout(resolve, 2000)); // Wait before retry
           }
@@ -602,13 +659,57 @@ export default function App() {
                           {news.sentiment === 'positive' ? '利好' : news.sentiment === 'negative' ? '利空' : '中性'}
                         </span>
                       </div>
-                      <p className="text-[10px] text-zinc-500 leading-relaxed">{news.summary}</p>
+                      <p className="text-[10px] text-zinc-500 leading-relaxed mb-2">{news.summary}</p>
+                      <div className="flex gap-2">
+                        <a 
+                          href={news.url} 
+                          target="_blank" 
+                          rel="noopener noreferrer" 
+                          className="text-[9px] text-emerald-600 hover:underline flex items-center gap-1"
+                        >
+                          查看原文
+                        </a>
+                        <button 
+                          onClick={() => handleDeepSummary(news.title, news.url)}
+                          className="text-[9px] text-blue-600 hover:underline flex items-center gap-1"
+                          disabled={deepLoading}
+                        >
+                          {deepLoading ? '總結中...' : '深度總結'}
+                        </button>
+                      </div>
                     </div>
                   ))
                 )}
               </div>
             </div>
           </div>
+
+          {/* Deep Summary Modal */}
+          {deepSummary && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden flex flex-col shadow-2xl">
+                <div className="p-4 border-b border-zinc-100 flex justify-between items-center bg-zinc-50">
+                  <h3 className="font-bold text-zinc-900 truncate pr-4">{deepSummary.title} - 深度總結</h3>
+                  <button onClick={() => setDeepSummary(null)} className="p-1 hover:bg-zinc-200 rounded-full transition-colors">
+                    <X size={20} />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-6 prose prose-zinc max-w-none">
+                  <div className="text-sm text-zinc-700 whitespace-pre-wrap leading-relaxed">
+                    {deepSummary.summary}
+                  </div>
+                </div>
+                <div className="p-4 border-t border-zinc-100 bg-zinc-50 flex justify-end">
+                  <button 
+                    onClick={() => setDeepSummary(null)}
+                    className="px-4 py-2 bg-zinc-900 text-white rounded-xl text-sm font-medium hover:bg-zinc-800 transition-colors"
+                  >
+                    關閉
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       );
     }
@@ -653,7 +754,7 @@ export default function App() {
         <div className="mt-8 space-y-8">
           {price !== null && (
             <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-zinc-200">
-              <h3 className="text-lg font-semibold mb-2">实时价格: {price.toFixed(2)}</h3>
+              <h3 className="text-lg font-semibold mb-2">实时价格: {typeof price === 'number' ? price.toFixed(2) : (price ?? 'N/A')}</h3>
               <div className="flex gap-2 mb-4">
                 <input type="number" placeholder="目标价格" id="targetPrice" className="p-2 border rounded" />
                 <select id="alertType" className="p-2 border rounded">
@@ -734,12 +835,12 @@ export default function App() {
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                     <MetricCard 
                       title="流動比率 (Current Ratio)" 
-                      value={fundamentalData.financialData?.currentRatio?.toFixed(2) || 'N/A'}
+                      value={typeof fundamentalData.financialData?.currentRatio === 'number' ? fundamentalData.financialData.currentRatio.toFixed(2) : 'N/A'}
                       explanation="短期資產能否覆蓋短期負債。> 1.5 較安全。"
                     />
                     <MetricCard 
                       title="負債權益比 (D/E)" 
-                      value={fundamentalData.financialData?.debtToEquity?.toFixed(2) || 'N/A'}
+                      value={typeof fundamentalData.financialData?.debtToEquity === 'number' ? fundamentalData.financialData.debtToEquity.toFixed(2) : 'N/A'}
                       explanation="總負債與股東權益的比值。越高代表槓桿越高，風險越大。"
                     />
                   </div>
@@ -751,18 +852,18 @@ export default function App() {
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                     <MetricCard 
                       title="本益比 (P/E)" 
-                      value={fundamentalData.summaryDetail?.trailingPE?.toFixed(2) || 'N/A'}
+                      value={typeof fundamentalData.summaryDetail?.trailingPE === 'number' ? fundamentalData.summaryDetail.trailingPE.toFixed(2) : 'N/A'}
                       interpretation={getPEInterpretation(fundamentalData.summaryDetail?.trailingPE)}
                       explanation="回本年期。17.87 代表假設利潤不變，需 17.87 年回本。越低越便宜。"
                     />
                     <MetricCard 
                       title="本淨比 (P/B)" 
-                      value={fundamentalData.defaultKeyStatistics?.priceToBook?.toFixed(2) || 'N/A'}
+                      value={typeof fundamentalData.defaultKeyStatistics?.priceToBook === 'number' ? fundamentalData.defaultKeyStatistics.priceToBook.toFixed(2) : 'N/A'}
                       explanation="股價與每股淨值的比率。通常 < 1.5 代表具備安全邊際。"
                     />
                     <MetricCard 
                       title="PEG 比率" 
-                      value={fundamentalData.defaultKeyStatistics?.pegRatio?.toFixed(2) || 'N/A'}
+                      value={typeof fundamentalData.defaultKeyStatistics?.pegRatio === 'number' ? fundamentalData.defaultKeyStatistics.pegRatio.toFixed(2) : 'N/A'}
                       explanation="考慮成長性的本益比。 < 1 代表估值合理且具成長潛力。"
                     />
                     <MetricCard 

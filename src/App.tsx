@@ -153,7 +153,7 @@ export default function App() {
 
   useEffect(() => {
     const newSocket = io(window.location.origin, {
-      transports: ['polling', 'websocket'],
+      transports: ['websocket'],
       withCredentials: true,
       reconnectionAttempts: 5,
       timeout: 20000
@@ -293,7 +293,10 @@ export default function App() {
       
       Include:
       1. Executive Summary (一分鐘看懂成績單)
-      2. Comprehensive Analysis (Technical & Fundamental) (綜合技術與基本面分析)
+      2. Creative Analogy (生活化比喻)
+         - Use simple, everyday analogies like a 'Bakery' or an 'Athlete' to explain the stock's current situation, potential, and risks. 
+         - For example, if it's Tencent, you might compare it to a leading bakery with popular products but facing some 'stomach discomfort' (security issues) that it needs to solve.
+      3. Comprehensive Analysis (Technical & Fundamental) (綜合技術與基本面分析)
          - IMPORTANT: In this section, you MUST analyze and report any signals from RSI, MACD, Bollinger Bands, and Moving Averages (MA). If there are any buy/sell/trend signals, explicitly state them.
       3. Key Metrics Table (關鍵數據表現)
          - IMPORTANT: For each metric in this table, the 'meaning' field MUST be a detailed, beginner-friendly explanation. 
@@ -303,12 +306,18 @@ export default function App() {
       4. SWOT Analysis (好消息與風險提示)
       5. Investment Advice (投資建議)
       6. Investment Strategy (投資策略 - 短/中/長期買賣、止盈、止損)
+         - IMPORTANT: For short, medium, and long-term strategies, provide specific buy/sell point descriptions, target price ranges, and corresponding risk warnings.
+         - For take-profit and stop-loss, provide specific values or ranges based on current technical indicators (RSI, MACD, Moving Averages) and company fundamentals, and explain the reasoning.
       7. Conclusion (總結)
 
       Output ONLY in JSON format following this schema:
       {
         "companyName": "...",
         "executiveSummary": "...",
+        "creativeAnalogy": {
+          "title": "...",
+          "content": "..."
+        },
         "comprehensiveAnalysis": "...",
         "keyMetrics": [
           {"label": "市盈率 (P/E)", "value": "...", "meaning": "...", "rating": "..."},
@@ -319,7 +328,13 @@ export default function App() {
         ],
         "swot": {"pros": ["..."], "cons": ["..."]},
         "investmentAdvice": {"suitableFor": "...", "notSuitableFor": "...", "tips": ["..."], "monitoringPoints": ["..."]},
-        "investmentStrategy": {"short": "...", "medium": "...", "long": "...", "takeProfit": "...", "stopLoss": "..."},
+        "investmentStrategy": {
+          "shortTerm": { "action": "...", "buyPoint": "...", "sellPoint": "...", "targetRange": "...", "riskWarning": "..." },
+          "mediumTerm": { "action": "...", "buyPoint": "...", "sellPoint": "...", "targetRange": "...", "riskWarning": "..." },
+          "longTerm": { "action": "...", "buyPoint": "...", "sellPoint": "...", "targetRange": "...", "riskWarning": "..." },
+          "takeProfit": { "value": "...", "basis": "..." },
+          "stopLoss": { "value": "...", "basis": "..." }
+        },
         "conclusion": "..."
       }
       `;
@@ -679,13 +694,24 @@ export default function App() {
               <p className="text-zinc-700">{retailReport.executiveSummary}</p>
             </section>
 
+            {retailReport.creativeAnalogy && (
+              <section className="p-5 bg-blue-50 rounded-2xl border border-blue-100">
+                <h3 className="text-lg font-bold mb-2 text-blue-900 flex items-center gap-2">
+                  <span className="text-xl">💡</span> 2. 生活化比喻：{retailReport.creativeAnalogy.title}
+                </h3>
+                <p className="text-blue-800 leading-relaxed italic">
+                  「{retailReport.creativeAnalogy.content}」
+                </p>
+              </section>
+            )}
+
             <section>
-              <h3 className="text-lg font-semibold mb-2">2. 綜合技術與基本面分析</h3>
+              <h3 className="text-lg font-semibold mb-2">3. 綜合技術與基本面分析</h3>
               <p className="text-zinc-700 whitespace-pre-wrap">{retailReport.comprehensiveAnalysis}</p>
             </section>
 
             <section>
-              <h3 className="text-lg font-semibold mb-2">3. 關鍵數據表現</h3>
+              <h3 className="text-lg font-semibold mb-2">4. 關鍵數據表現</h3>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm text-left">
                   <thead className="text-xs text-zinc-700 uppercase bg-zinc-50">
@@ -718,7 +744,7 @@ export default function App() {
 
             <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <h3 className="text-lg font-semibold mb-2 text-emerald-700">好消息</h3>
+                <h3 className="text-lg font-semibold mb-2 text-emerald-700">5. 好消息</h3>
                 <ul className="list-disc list-inside text-sm text-zinc-700 space-y-1">
                   {retailReport.swot?.pros?.map((p: string, i: number) => <li key={i}>{p}</li>)}
                 </ul>
@@ -732,7 +758,7 @@ export default function App() {
             </section>
 
             <section>
-              <h3 className="text-lg font-semibold mb-2">5. 投資建議</h3>
+              <h3 className="text-lg font-semibold mb-2">6. 投資建議</h3>
               <div className="text-sm text-zinc-700 space-y-2">
                 <p><strong>適合誰：</strong> {retailReport.investmentAdvice?.suitableFor}</p>
                 <p><strong>不適合誰：</strong> {retailReport.investmentAdvice?.notSuitableFor}</p>
@@ -748,13 +774,41 @@ export default function App() {
             </section>
 
             <section>
-              <h3 className="text-lg font-semibold mb-2">6. 投資策略 (短/中/長期買賣、止盈、止損)</h3>
-              <div className="text-sm text-zinc-700 space-y-2">
-                <p><strong>短期策略：</strong> {retailReport.investmentStrategy?.short}</p>
-                <p><strong>中期策略：</strong> {retailReport.investmentStrategy?.medium}</p>
-                <p><strong>長期策略：</strong> {retailReport.investmentStrategy?.long}</p>
-                <p><strong>止盈水平：</strong> {retailReport.investmentStrategy?.takeProfit}</p>
-                <p><strong>止損水平：</strong> {retailReport.investmentStrategy?.stopLoss}</p>
+              <h3 className="text-lg font-semibold mb-4">7. 投資策略 (短/中/長期買賣、止盈、止損)</h3>
+              <div className="space-y-4">
+                {/* Term Strategies */}
+                {[
+                  { label: '短期策略 (1-4週)', data: retailReport.investmentStrategy?.shortTerm },
+                  { label: '中期策略 (1-6個月)', data: retailReport.investmentStrategy?.mediumTerm },
+                  { label: '長期策略 (6個月以上)', data: retailReport.investmentStrategy?.longTerm }
+                ].map((term, i) => (
+                  <div key={i} className="p-4 bg-zinc-50 rounded-xl border border-zinc-100">
+                    <h4 className="font-bold text-zinc-900 mb-2">{term.label}</h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 text-sm">
+                      <p><span className="text-zinc-500">建議操作：</span><span className="font-medium">{term.data?.action}</span></p>
+                      <p><span className="text-zinc-500">目標區間：</span><span className="font-medium text-emerald-600">{term.data?.targetRange}</span></p>
+                      <p><span className="text-zinc-500">買入點位：</span><span>{term.data?.buyPoint}</span></p>
+                      <p><span className="text-zinc-500">賣出點位：</span><span>{term.data?.sellPoint}</span></p>
+                      <div className="md:col-span-2 mt-1 p-2 bg-amber-50 rounded border border-amber-100">
+                        <p className="text-xs text-amber-700"><strong>風險提示：</strong>{term.data?.riskWarning}</p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+
+                {/* Exit Strategies */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-100">
+                    <h4 className="font-bold text-emerald-900 mb-1">止盈水平 (Take Profit)</h4>
+                    <p className="text-lg font-bold text-emerald-600 mb-1">{retailReport.investmentStrategy?.takeProfit?.value}</p>
+                    <p className="text-xs text-emerald-700"><strong>設定依據：</strong>{retailReport.investmentStrategy?.takeProfit?.basis}</p>
+                  </div>
+                  <div className="p-4 bg-red-50 rounded-xl border border-red-100">
+                    <h4 className="font-bold text-red-900 mb-1">止損水平 (Stop Loss)</h4>
+                    <p className="text-lg font-bold text-red-600 mb-1">{retailReport.investmentStrategy?.stopLoss?.value}</p>
+                    <p className="text-xs text-red-700"><strong>設定依據：</strong>{retailReport.investmentStrategy?.stopLoss?.basis}</p>
+                  </div>
+                </div>
               </div>
             </section>
 

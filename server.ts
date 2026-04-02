@@ -5,6 +5,7 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import cors from "cors";
 
 dotenv.config();
 
@@ -52,15 +53,20 @@ function calculateSMA(data: any[], period: number) {
 
 async function startServer() {
   const app = express();
+  app.use(cors({
+    origin: true,
+    credentials: true
+  }));
   app.use(express.json());
   const httpServer = http.createServer(app);
   const io = new Server(httpServer, {
     cors: {
-      origin: true, // Allow all origins
+      origin: true,
       methods: ["GET", "POST"],
       credentials: true
     },
-    allowEIO3: true // Support older clients if needed
+    transports: ['websocket', 'polling'],
+    allowEIO3: true
   });
   const PORT = 3000;
 
